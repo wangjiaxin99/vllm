@@ -92,10 +92,6 @@ def triton_kernel_fused_experts(
     assert (quant_config.w2_bias is None
             or quant_config.w2_bias.dtype == torch.float32)
 
-    # Shape check, only check non-mxfp4
-    assert hidden_states.shape[-1] == w1.shape[-2]
-    assert w2.shape[-1] == w1.shape[1]
-
     E, _, N = w1.shape
 
     if global_num_experts == -1:
@@ -109,12 +105,13 @@ def triton_kernel_fused_experts(
     hidden_states = downcast_to_static_fp8(hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale)
 
     intermediate_cache1 = moe_gemm_a8w4(hidden_states, 
-        w1.storage.data, 
+        w1, 
         None, 
         quant_config.w1_precision.weight_scale.storage.data, 
         quant_config.w1_precision.flex_ctx.lhs_data.scale, 
         quant_config.w2_precision.flex_ctx.lhs_data.scale, 
-        quant_config.w1_bias, routing_data, 
+        quant_config.w1_bias, 
+        routing_data, 
         gather_indx=gather_indx, 
         gammas=gammas if apply_router_weight_on_input else None, 
         swizzle_mx_scale="CDNA4_SCALE", 
@@ -124,7 +121,7 @@ def triton_kernel_fused_experts(
         limit=swiglu_limit)
 
     intermediate_cache3 = moe_gemm_a8w4(intermediate_cache1, 
-        w2.storage.data, 
+        w2, 
         None, 
         quant_config.w2_precision.weight_scale.storage.data, 
         quant_config.w2_precision.flex_ctx.lhs_data.scale, 
