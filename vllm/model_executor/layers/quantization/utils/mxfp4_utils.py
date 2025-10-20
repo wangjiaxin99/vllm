@@ -8,7 +8,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
 import vllm.envs as envs
-from aiter.ops.shuffle import shuffle_weight
 
 logger = init_logger(__name__)
 
@@ -73,13 +72,8 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
     if current_platform.is_rocm():
-        quant_tensor = quant_tensor.transpose(-2, -1)
-        quant_tensor = shuffle_weight(quant_tensor)
-        quant_tensor = quant_tensor.reshape(
-                quant_tensor.shape[0],
-                quant_tensor.shape[1] // 16,
-                quant_tensor.shape[2] * 16,
-            )
+        quant_tensor = convert_layout(
+            wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout)
         scale = convert_layout(wrap_torch_tensor(scale), scale_layout)
     else:
         quant_tensor = convert_layout(
