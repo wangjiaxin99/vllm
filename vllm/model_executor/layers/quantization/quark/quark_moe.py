@@ -500,7 +500,10 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64)
+
         self.unpadded_hidden_size = unpadded_hidden_size
+        self.hidden_pad = hidden_size - unpadded_hidden_size
+        self.intermediate_pad = intermediate_size_per_partition_after_pad - intermediate_size_per_partition
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
