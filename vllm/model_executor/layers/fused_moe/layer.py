@@ -918,6 +918,7 @@ class FusedMoE(CustomOp):
             elif (current_platform.is_rocm() or current_mxfp4_backend
                   == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
                   current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
+                unpadded_hidden_size = hidden_size
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
@@ -1048,6 +1049,7 @@ class FusedMoE(CustomOp):
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
+            "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition":
             self.intermediate_size_per_partition,
             "params_dtype": params_dtype,

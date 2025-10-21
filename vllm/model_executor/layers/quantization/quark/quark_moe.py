@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional, Union
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm import envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import round_up
+import aiter
+from aiter.fused_moe import fused_topk, moe_sorting
+from aiter.ops.shuffle import shuffle_mxfp4_weight, shuffle_mxfp4_scale
 
 logger = init_logger(__name__)
 
@@ -475,7 +479,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                 "layers computed in high precision.")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
+                       hidden_size: int, unpadded_hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
         self.num_experts = num_experts
         # Add the quantization method used (per tensor/grouped/channel)
@@ -496,6 +500,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64)
+        self.unpadded_hidden_size = unpadded_hidden_size
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
@@ -604,14 +609,30 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         else:
             num_warps = 8
 
-        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-            layer.w13_weight, layer.w13_weight_scale, num_warps)
-        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(layer.w2_weight,
-                                                      layer.w2_weight_scale,
-                                                      num_warps)
+        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            w13_aiter_weight = layer.w13_weight.contiguous()
+            w13_aiter_scale = layer.w13_weight_scale.contiguous()
+            w2_aiter_weight = layer.w2_weight.contiguous()
+            w2_aiter_scale = layer.w2_weight_scale.contiguous()
+            
+            e, n, k = w13_aiter_weight.shape
+            w13_aiter_weight = w13_aiter_weight.view(e, n // 2, 2, k).permute(0, 2, 1, 3).contiguous().view(e, n, k)
+            w13_aiter_scale = w13_aiter_scale.view(e, n // 2, 2, -1).permute(0, 2, 1, 3).contiguous().view(e, n, -1)
+            
+            self.w13_weight_aiter_tensor = shuffle_mxfp4_weight(w13_aiter_weight, 16, True)
+            self.w13_scale_aiter_tensor = shuffle_mxfp4_scale(w13_aiter_scale, True)
+            self.w2_weight_aiter_tensor = shuffle_mxfp4_weight(w2_aiter_weight, 16, False)
+            self.w2_scale_aiter_tensor = shuffle_mxfp4_scale(w2_aiter_scale, False)
+            self.w13_bias_aiter_tensor = layer.w13_bias.view(-1, n // 2, 2).permute(0, 2, 1).contiguous().view(-1, n)
+        else:
+            w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+                layer.w13_weight, layer.w13_weight_scale, num_warps)
+            w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(layer.w2_weight,
+                                                        layer.w2_weight_scale,
+                                                        num_warps)
 
-        self.w13_weight_triton_tensor = w13_weight
-        self.w2_weight_triton_tensor = w2_weight
+            self.w13_weight_triton_tensor = w13_weight
+            self.w2_weight_triton_tensor = w2_weight
 
         # need to delete the original weights to save memory on single GPU
         del layer.w13_weight
@@ -620,7 +641,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
         layer.w2_weight = None
         torch.cuda.empty_cache()
 
-        if self.static_input_scales:  # wmxfp4 a fp8 pertensor
+        if not envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
             if (layer.w13_input_scale is None or layer.w2_input_scale is None):
                 raise ValueError(
                     "QuantConfig has static quantization, but found "
@@ -654,27 +675,21 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                                                        flex_ctx=FlexCtx(
                                                            rhs_data=w2_flex,
                                                            lhs_data=lhs_data2))
-        else:
-            self.w13_precision_config = PrecisionConfig(
-                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex))
-            self.w2_precision_config = PrecisionConfig(
-                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex))
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        w1_scale = self.w13_precision_config
-        w2_scale = self.w2_precision_config
-
-        if self.static_input_scales:
-            # TODO: how to set scale?
+        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
             return mxfp4_w4a4_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
+                w1_scale=self.w13_scale_aiter_tensor,
+                w2_scale=self.w2_scale_aiter_tensor,
             )
-
         else:
+            w1_scale = self.w13_precision_config
+            w2_scale = self.w2_precision_config
+
+            # TODO: how to set scale?
             return mxfp4_w4a4_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
@@ -711,18 +726,73 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet.")
 
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
-            triton_kernel_moe_forward)
+        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            token_num = x.shape[0]
+            BLOCKM = 16 if token_num < 2048 else 32
+            topk_weights, topk_ids = fused_topk(x, router_logits, top_k, True)
+            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_out = moe_sorting(
+                topk_ids,
+                topk_weights,
+                self.num_experts,
+                x.shape[1],
+                torch.bfloat16,
+                BLOCKM
+            )
+            _, n1, k1 = self.w13_weight_aiter_tensor.shape
+            _, k2, n2 = self.w2_weight_aiter_tensor.shape
+            D = n2 if k2 == k1 else n2*2
+            cktile_moe_out1 = torch.empty((token_num, top_k, D), dtype=torch.bfloat16, device=x.device)
+            aiter.moe_cktile2stages_gemm1(
+                x,
+                self.w13_weight_aiter_tensor,
+                cktile_moe_out1,
+                sorted_ids,
+                sorted_expert_ids,
+                num_valid_ids,
+                top_k,
+                self.intermediate_pad // 64 * 64 * 2,
+                self.hidden_pad // 128 * 128, # k_pad_zeros
+                None, # sorted_weights
+                None,
+                self.w13_scale_aiter_tensor,
+                self.w13_bias_aiter_tensor,
+                BLOCKM, # block_size
+            )
+            aiter.moe_cktile2stages_gemm2(
+                cktile_moe_out1,
+                self.w2_weight_aiter_tensor,
+                moe_out,
+                sorted_ids,
+                sorted_expert_ids,
+                num_valid_ids,
+                top_k,
+                self.hidden_pad // 64 * 64, # n_pad_zeros
+                self.intermediate_pad // 128 * 128,
+                sorted_weights, # sorted_weights
+                None,
+                self.w2_scale_aiter_tensor,
+                layer.w2_bias,
+                BLOCKM, # block_size
+            )
+            return moe_out
 
-        return triton_kernel_moe_forward(
-            hidden_states=x,
-            w1=self.w13_weight_triton_tensor,
-            w2=self.w2_weight_triton_tensor,
-            gating_output=router_logits,
-            topk=top_k,
-            renormalize=renormalize,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            quant_config=self.moe_quant_config,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
+        else:
+            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+                triton_kernel_moe_forward)
+
+            return triton_kernel_moe_forward(
+                hidden_states=x,
+                w1=self.w13_weight_triton_tensor,
+                w2=self.w2_weight_triton_tensor,
+                gating_output=router_logits,
+                topk=top_k,
+                renormalize=renormalize,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                unpadded_N_w1 = self.intermediate_size_per_partition * 2,
+                unpadded_K_w1 = self.unpadded_hidden_size,
+                unpadded_N_w2 = self.unpadded_hidden_size,
+                unpadded_K_w2 = self.intermediate_size_per_partition
+            )

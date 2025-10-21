@@ -43,6 +43,10 @@ def triton_kernel_moe_forward(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
+    unpadded_N_w1 = None,
+    unpadded_K_w1 = None,
+    unpadded_N_w2 = None,
+    unpadded_K_w2 = None
 ) -> torch.Tensor:
 
     routing_data, gather_idx, scatter_idx = routing(gating_output,
@@ -61,7 +65,11 @@ def triton_kernel_moe_forward(
         quant_config=quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
         global_num_experts=global_num_experts,
-        expert_map=expert_map)
+        expert_map=expert_map,
+        unpadded_N_w1=unpadded_N_w1,
+        unpadded_K_w1=unpadded_K_w1,
+        unpadded_N_w2=unpadded_N_w2,
+        unpadded_K_w2=unpadded_K_w2)
 
 
 # This is a triton implementation of the fused_experts function
@@ -81,6 +89,10 @@ def triton_kernel_fused_experts(
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     a1q_scale: Optional[torch.Tensor] = None,
+    unpadded_N_w1 = None,
+    unpadded_K_w1 = None,
+    unpadded_N_w2 = None,
+    unpadded_K_w2 = None
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -121,7 +133,9 @@ def triton_kernel_fused_experts(
         out_dtype=torch.float8_e4m3fn, 
         apply_swiglu=True, 
         alpha=swiglu_alpha, 
-        limit=swiglu_limit)
+        limit=swiglu_limit,
+        unpadded_N=unpadded_N_w1,
+        unpadded_K=unpadded_K_w1)
 
     intermediate_cache3 = moe_gemm_a8w4(intermediate_cache1, 
         w2.storage.data, 
@@ -133,7 +147,9 @@ def triton_kernel_fused_experts(
         routing_data, 
         scatter_indx=scatter_indx, 
         gammas=None if apply_router_weight_on_input else gammas, 
-        swizzle_mx_scale="CDNA4_SCALE")
+        swizzle_mx_scale="CDNA4_SCALE",
+        unpadded_N=unpadded_N_w2,
+        unpadded_K=unpadded_K_w2)
 
     return intermediate_cache3
 
