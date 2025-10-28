@@ -53,6 +53,9 @@ class Mxfp4Backend(Enum):
     # Triton Backend
     TRITON = 6
 
+    # CK Backend
+    CK = 7
+
 
 def get_mxfp4_backend():
     # Backend Selection
@@ -98,9 +101,13 @@ def get_mxfp4_backend():
         else:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
-    elif current_platform.is_rocm() and has_triton_kernels():
-        logger.info_once("Using Triton backend")
-        return Mxfp4Backend.TRITON
+    elif current_platform.is_rocm():
+        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            logger.info_once("Using CK backend")
+            return Mxfp4Backend.CK
+        else:
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
 
     return Mxfp4Backend.NONE
 
@@ -190,6 +197,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.topk_indices_dtype = None
         self.moe = moe
+        self.mxfp4_backend = get_mxfp4_backend()
         self.use_marlin = self._should_use_marlin()
         self.max_capture_size = get_current_vllm_config(
         ).compilation_config.max_capture_size
@@ -665,6 +673,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
