@@ -21,7 +21,7 @@ if has_triton_kernels():
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
-        from triton_kernels.routing import routing
+        from aiter.ops.triton.moe_routing.routing import routing
     except ModuleNotFoundError:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -49,9 +49,7 @@ def triton_kernel_moe_forward(
     unpadded_K_w2 = None
 ) -> torch.Tensor:
 
-    routing_data, gather_idx, scatter_idx = routing(gating_output,
-                                                    topk,
-                                                    sm_first=not renormalize)
+    routing_data, gather_idx, scatter_idx = routing(gating_output, topk, sm_first=not renormalize)
 
     return triton_kernel_fused_experts(
         None,
