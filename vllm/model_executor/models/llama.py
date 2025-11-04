@@ -340,12 +340,12 @@ class LlamaDecoderLayer(nn.Module):
             if residual is None:
                 residual = hidden_states
                 hidden_states, _, _, _ = fused_rms_fp8_per_tensor_static_quant(hidden_states, weight, eps, scale,
-                                                               None, None, None,
+                                                               None, None, eps,
                                                                dtype_quant=rocm_aiter_fp8_dtype,
                                                                res1=None)
             else:
                 hidden_states, _, _, residual = fused_rms_fp8_per_tensor_static_quant(hidden_states, weight, eps, scale,
-                                                               None, None, None,
+                                                               None, None, eps,
                                                                dtype_quant=rocm_aiter_fp8_dtype,
                                                                res1=residual)
         else:
@@ -359,8 +359,18 @@ class LlamaDecoderLayer(nn.Module):
                                        hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        scale = self.mlp.gate_up_proj.input_scale
+        if scale is not None and VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP8_QUANT:
+            # Static FP8 quantization
+            weight = self.post_attention_layernorm.weight
+            eps = self.post_attention_layernorm.variance_epsilon
+            hidden_states, _, _, residual = fused_rms_fp8_per_tensor_static_quant(hidden_states, weight, eps, scale,
+                                                None, None, eps,
+                                                dtype_quant=rocm_aiter_fp8_dtype,
+                                                res1=residual)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
