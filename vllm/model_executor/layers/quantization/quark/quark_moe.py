@@ -23,8 +23,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 import aiter
-from aiter.fused_moe import fused_topk, moe_sorting
-from aiter.ops.shuffle import shuffle_mxfp4_weight, shuffle_mxfp4_scale
 
 logger = init_logger(__name__)
 
@@ -613,6 +611,8 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
             num_warps = 8
 
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            from aiter.ops.shuffle import shuffle_mxfp4_weight, shuffle_mxfp4_scale
+
             w13_aiter_weight = layer.w13_weight.contiguous()
             w13_aiter_scale = layer.w13_weight_scale.contiguous()
             w2_aiter_weight = layer.w2_weight.contiguous()
@@ -730,6 +730,8 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkMoEMethod):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet.")
 
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+            from aiter.fused_moe import fused_topk, moe_sorting
+    
             token_num = x.shape[0]
             BLOCKM = 16 if token_num < 2048 else 32
             topk_weights, topk_ids = fused_topk(x, router_logits, top_k, True)
