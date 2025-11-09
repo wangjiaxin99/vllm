@@ -10,25 +10,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG, FusedMoEQuantConfig)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
-from vllm.utils import has_triton_kernels
-from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4, downcast_to_static_fp8
+from aiter.ops.triton.moe_routing.routing import routing
+from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
+from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
 
 logger = init_logger(__name__)
-
-if has_triton_kernels():
-    try:
-        import triton_kernels.swiglu
-        from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
-                                               matmul_ogs)
-        from aiter.ops.triton.moe_routing.routing import routing
-    except ModuleNotFoundError:
-        logger.error(
-            "Failed to import Triton kernels. Please make sure your triton "
-            "version is compatible.")
-
-if TYPE_CHECKING:
-    from triton_kernels.matmul_ogs import PrecisionConfig
 
 
 def triton_kernel_moe_forward(
@@ -111,9 +98,6 @@ def triton_kernel_fused_experts(
     if global_num_experts == -1:
         global_num_experts = E
 
-    act = FusedActivation(
-        FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
-        (swiglu_alpha, swiglu_limit), 2)
     gammas = routing_data.gate_scal if routing_data else None
 
     hidden_states = downcast_to_static_fp8(hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale)
