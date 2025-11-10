@@ -603,6 +603,7 @@ class GptOssModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        mxfp4_block = 32
         use_ep = self.parallel_config.enable_expert_parallel
         if use_ep:
             pass  # TODO: error
@@ -618,6 +619,7 @@ class GptOssModel(nn.Module):
                           intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
+
             if "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
                 param = params_dict[name]
@@ -628,7 +630,7 @@ class GptOssModel(nn.Module):
                 continue
 
             # mapping to convert individual experts input_scale into fused_moe.
-            if "input_scale" in name:  # w2 w13 input_scale
+            elif "input_scale" in name:  # w2 w13 input_scale
                 parts = name.split(".")
                 expert_id = int(parts[-2])
                 name = ".".join(parts[:-2] + parts[-1:])
@@ -644,24 +646,131 @@ class GptOssModel(nn.Module):
                 loaded_params.add(name)
                 continue
 
-            # mapping to convert weight and bias of individual
-            # experts gate_up_proj  into fused_moe.
-            if ".w13" in name:
+            elif ".w13_weight_scale" in name:
                 parts = name.split(".")
                 expert_id = int(parts[-2])
                 name = ".".join(parts[:-2] + parts[-1:])
+                # Handle MLP gate and up projection weights scale
                 if use_ep:
-                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end,
-                                                  ...]
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
-                    narrow_weight = loaded_weight[2 * tp_rank_start:2 *
-                                                  tp_rank_end, ...]
-                param = params_dict[name]
+                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end, ...]
 
+                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param,
                               narrow_weight,
+                              weight_name=name,
+                              shard_id=None,
+                              expert_id=expert_id)
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_weight_scale" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[..., tp_rank_start //
+                                           mxfp4_block:tp_rank_end //
+                                           mxfp4_block]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=name,
+                              shard_id=None,
+                              expert_id=expert_id)
+                loaded_params.add(name)
+                continue
+
+            # mapping to convert weight and bias of individual
+            # experts gate_up_proj  into fused_moe.
+            elif ".w13_weight" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+
+                # Extract gate and up projection parts
+                # since the weight is shuffled, we can slice directly
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end, ...]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=name,
+                              shard_id=None,
+                              expert_id=expert_id)
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_weight" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[..., tp_rank_start // 2:tp_rank_end // 2]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=name,
+                              shard_id=None,
+                              expert_id=expert_id)
+                loaded_params.add(name)
+                continue
+
+            elif ".w13_bias" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight[2 * tp_rank_start:2 * tp_rank_end]
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param,
+                              narrow_weight,
+                              weight_name=name,
+                              shard_id=None,
+                              expert_id=expert_id)
+                loaded_params.add(name)
+                continue
+
+            elif ".w2_bias" in name:
+                parts = name.split(".")
+                expert_id = int(parts[-2])
+                name = ".".join(parts[:-2] + parts[-1:])
+                # Handle MLP down projection bias
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                if use_ep:
+                    loaded_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    # (only load on rank 0 to avoid duplication)
+                    if tp_rank != 0:
+                        loaded_weight.zero_()
+                weight_loader(param,
+                              loaded_weight,
                               weight_name=name,
                               shard_id=None,
                               expert_id=expert_id)
@@ -820,6 +929,9 @@ class GptOssForCausalLM(nn.Module):
             ".gate_up_proj.weight_scale": ".w13_weight_scale",
             ".gate_up_proj.bias": ".w13_bias",
             ".gate_up_proj.input_scale": ".w13_input_scale",
+            ".down_proj.weight": ".w2_weight",
+            ".down_proj.weight_scale": ".w2_weight_scale",
+            ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale"
         },
     )
