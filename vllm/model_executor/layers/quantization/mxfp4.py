@@ -500,9 +500,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w13_aiter_scale = w13_aiter_scale.view(e, n // 2, 2, -1).permute(0, 2, 1, 3).contiguous().view(e, n, -1)
                 
                 self.w13_weight_aiter_tensor = shuffle_weight_a16w4(w13_aiter_weight, 16, True)
-                self.w13_scale_aiter_tensor = shuffle_scale_a16w4(w13_aiter_scale, True)
+                w13_aiter_scale = w13_aiter_scale.view(e * n, -1)
+                self.w13_scale_aiter_tensor = shuffle_scale_a16w4(w13_aiter_scale, e, True)
                 self.w2_weight_aiter_tensor = shuffle_weight_a16w4(w2_aiter_weight, 16, False)
-                self.w2_scale_aiter_tensor = shuffle_scale_a16w4(w2_aiter_scale, False)
+                w2_aiter_scale = w2_aiter_scale.view(e * n, -1)
+                self.w2_scale_aiter_tensor = shuffle_scale_a16w4(w2_aiter_scale, e, False)
                 self.w13_bias_aiter_tensor = layer.w13_bias.view(-1, n // 2, 2).permute(0, 2, 1).contiguous().view(-1, n)
             else: 
                 w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
