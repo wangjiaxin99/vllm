@@ -144,7 +144,7 @@ def should_use_flashinfer_mxfp4():
 if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
     import aiter
     from aiter.fused_moe import fused_topk, moe_sorting
-    from aiter.ops.shuffle import shuffle_mxfp4_weight, shuffle_mxfp4_scale
+    from aiter.ops.shuffle import shuffle_weight_a16w4, shuffle_scale_a16w4
     
 class Mxfp4Config(QuantizationConfig):
 
@@ -499,10 +499,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w13_aiter_weight = w13_aiter_weight.view(e, n // 2, 2, k).permute(0, 2, 1, 3).contiguous().view(e, n, k)
                 w13_aiter_scale = w13_aiter_scale.view(e, n // 2, 2, -1).permute(0, 2, 1, 3).contiguous().view(e, n, -1)
                 
-                self.w13_weight_aiter_tensor = shuffle_mxfp4_weight(w13_aiter_weight, 16, True)
-                self.w13_scale_aiter_tensor = shuffle_mxfp4_scale(w13_aiter_scale, True)
-                self.w2_weight_aiter_tensor = shuffle_mxfp4_weight(w2_aiter_weight, 16, False)
-                self.w2_scale_aiter_tensor = shuffle_mxfp4_scale(w2_aiter_scale, False)
+                self.w13_weight_aiter_tensor = shuffle_weight_a16w4(w13_aiter_weight, 16, True)
+                self.w13_scale_aiter_tensor = shuffle_scale_a16w4(w13_aiter_scale, True)
+                self.w2_weight_aiter_tensor = shuffle_weight_a16w4(w2_aiter_weight, 16, False)
+                self.w2_scale_aiter_tensor = shuffle_scale_a16w4(w2_aiter_scale, False)
                 self.w13_bias_aiter_tensor = layer.w13_bias.view(-1, n // 2, 2).permute(0, 2, 1).contiguous().view(-1, n)
             else: 
                 w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
