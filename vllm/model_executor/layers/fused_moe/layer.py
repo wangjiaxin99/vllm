@@ -907,6 +907,7 @@ class FusedMoE(CustomOp):
 
         # we are padding globally so EP buffer allocation works
         self._is_mxfp4 = self.is_mxfp4_quant(quant_config=quant_config)
+        unpadded_hidden_size = hidden_size
         if self._is_mxfp4:
             from vllm.model_executor.layers.quantization.mxfp4 import (
                 Mxfp4Backend, get_mxfp4_backend)
@@ -918,7 +919,6 @@ class FusedMoE(CustomOp):
             elif (current_platform.is_rocm() or current_mxfp4_backend
                   == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM or
                   current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
-                unpadded_hidden_size = hidden_size
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
