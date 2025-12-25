@@ -34,6 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -321,7 +322,7 @@ class GptOssModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
-        print("params_dict keys", params_dict.keys())
+        # print("params_dict keys", params_dict.keys())
 
         mxfp4_block = 32
         use_ep = self.parallel_config.enable_expert_parallel
@@ -339,7 +340,24 @@ class GptOssModel(nn.Module):
                           intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-            print(f"iterate over {name} in _load_weights_quark")
+            # print(f"iterate over {name} in _load_weights_quark")
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             if "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
@@ -606,7 +624,7 @@ class GptOssModel(nn.Module):
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
         for name, weight in weights:
-            print("iterate over name:", name)
+            # print("iterate over name:", name)
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
@@ -741,7 +759,7 @@ class GptOssModel(nn.Module):
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
-                    print("SKIP 1")
+                    # print("SKIP 1")
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]
@@ -775,7 +793,7 @@ class GptOssModel(nn.Module):
         print("self here", self)
         params_dict = dict(self.named_parameters())
 
-        print("params_dict to load:", params_dict.keys())
+        # print("params_dict to load:", params_dict.keys())
         loaded_params: set[str] = set()
 
         use_ep = self.parallel_config.enable_expert_parallel

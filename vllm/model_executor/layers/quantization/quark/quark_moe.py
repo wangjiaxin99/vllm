@@ -74,7 +74,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         if quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_ocp_mx(weight_config, input_config):
-            print("USING QuarkOCP_MX_MoEMethod")
+            # print("USING QuarkOCP_MX_MoEMethod")
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config, quant_config.quant_config, layer_name)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
