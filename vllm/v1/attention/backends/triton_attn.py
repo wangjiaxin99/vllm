@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -340,9 +341,13 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype != self.fp8_dtype:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported."
-            )
+            if layer._q_scale_float != 1.0:
+                num_tokens, num_heads, head_size = query.shape
+                query, _ = ops.scaled_fp8_quant(
+                    query.reshape((num_tokens, num_heads * head_size)).contiguous(),
+                    layer._q_scale,
+                )
+                query = query.reshape((num_tokens, num_heads, head_size))
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -367,9 +372,10 @@ class TritonAttentionImpl(AttentionImpl):
             window_size=self.sliding_window,
             block_table=block_table,
             softcap=self.logits_soft_cap,
-            q_descale=None,  # Not supported
+            q_descale=layer._q_scale.expand(descale_shape),
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
+            p_descale=layer._prob_scale.expand(descale_shape),
             sinks=self.sinks,
             output_scale=output_scale,
         )

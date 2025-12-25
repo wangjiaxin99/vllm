@@ -65,8 +65,10 @@ def kernel_unified_attention_2d(
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
     scale,  # float32
+    q_scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
+    p_scale,  # float32
     out_scale,  # float32
     softcap,  # float32
     num_query_heads: tl.constexpr,  # int
@@ -275,7 +277,13 @@ def kernel_unified_attention_2d(
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
 
-        S += scale * tl.dot(Q, K)
+        if Q.dtype.is_fp8() and K.dtype.is_fp8():
+            q_scale_val = tl.load(q_scale)
+            k_scale_val = tl.load(k_scale)
+            S_tmp = scale * tl.dot(Q, K) * k_scale_val * q_scale_val
+            S += S_tmp
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -330,8 +338,17 @@ def kernel_unified_attention_2d(
         L = L * alpha + l_j
         M = m_j
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        if Q.dtype.is_fp8():
+            P_scale_val = tl.load(p_scale)
+            v_scale_val = tl.load(v_scale)
+            P_scaled = P / P_scale_val
+            P = P_scaled.to(V.dtype)
+            acc_1 = tl.dot(P, V)
+            acc_1 = acc_1 * P_scale_val * v_scale_val
+            acc += acc_1
+        else:
+            # acc : (BLOCK_M, HEAD_SIZE_PADDED)
+            acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
     acc = acc / L[:, None]
@@ -367,8 +384,10 @@ def kernel_unified_attention_3d(
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
     scale,  # float32
+    q_scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
+    p_scale,  # float32
     softcap,  # float32
     num_query_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
@@ -563,7 +582,14 @@ def kernel_unified_attention_3d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        S += scale * tl.dot(Q, K)
+
+        if Q.dtype.is_fp8() and K.dtype.is_fp8():
+            q_scale_val = tl.load(q_scale)
+            k_scale_val = tl.load(k_scale)
+            S_tmp = scale * tl.dot(Q, K) * k_scale_val * q_scale_val
+            S += S_tmp
+        else:
+            S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -618,8 +644,17 @@ def kernel_unified_attention_3d(
         L = L * alpha + l_j
         M = m_j
 
-        # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        acc += tl.dot(P.to(V.dtype), V)
+        if Q.dtype.is_fp8():
+            P_scale_val = tl.load(p_scale)
+            v_scale_val = tl.load(v_scale)
+            P_scaled = P / P_scale_val
+            P = P_scaled.to(V.dtype)
+            acc_1 = tl.dot(P, V)
+            acc_1 = acc_1 * P_scale_val * v_scale_val
+            acc += acc_1
+        else:
+            # acc : (BLOCK_M, HEAD_SIZE_PADDED)
+            acc += tl.dot(P.to(V.dtype), V)
 
     segm_output_offset = (
         query_offset_0[:, None].to(tl.int64)
@@ -749,6 +784,7 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    p_descale,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -756,7 +792,6 @@ def unified_attention(
     sinks=None,
 ):
     assert causal, "Only causal attention is supported"
-    assert q_descale is None, "Q scales not supported"
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -811,8 +846,10 @@ def unified_attention(
             alibi_slopes_ptr=alibi_slopes,
             qq_bias_ptr=qq_bias,
             scale=softmax_scale,
+            q_scale=q_descale,
             k_scale=k_descale,
             v_scale=v_descale,
+            p_scale=p_descale,
             out_scale=1 / output_scale if output_scale is not None else 1.0,
             softcap=softcap,
             num_query_heads=num_query_heads,
@@ -887,8 +924,10 @@ def unified_attention(
             alibi_slopes_ptr=alibi_slopes,
             qq_bias_ptr=qq_bias,
             scale=softmax_scale,
+            q_scale=q_descale,
             k_scale=k_descale,
             v_scale=v_descale,
+            p_scale=p_descale,
             softcap=softcap,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
