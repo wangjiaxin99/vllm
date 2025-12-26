@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 """Attention layer with PagedAttention and Triton prefix prefill."""
 from dataclasses import dataclass
 from functools import cache
@@ -417,23 +418,20 @@ class TritonAttentionImpl(AttentionImpl):
                         layer._k_scale,
                         layer._v_scale,
                     )
-
+        # assert False, f"kv_cache_dtype:{self.kv_cache_dtype}"
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             num_tokens, num_heads, head_size = query.shape
-            assert (
-                layer._q_scale_float == 1.0
-            ), "A non 1.0 q_scale is not currently supported."
-            if not current_platform.is_rocm():
-                # Skip Q quantization on ROCm, since dequantizing back to
-                # f32 in the attention kernel is not supported.
+
+            if os.getenv("USE_Q_SCALE", "1").lower() in ("1", "true"):
                 query, _ = ops.scaled_fp8_quant(
                     query.reshape((num_tokens, num_heads * head_size)).contiguous(),
                     layer._q_scale,
                 )
                 query = query.reshape((num_tokens, num_heads, head_size))
 
+            # assert False, f"query:{query}, query.dtype: {query.dtype}, layer._q_scale.dtype: {layer._q_scale.dtype}"
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
         max_seqlen_q = attn_metadata.max_query_len
@@ -466,7 +464,8 @@ class TritonAttentionImpl(AttentionImpl):
 
         else:
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
-
+            # assert False, f"[DEBUG] k_descale: {layer._k_scale.expand(descale_shape)}"
+            # assert False, f"query.dtype: {query.dtype},key_cache.dtype: {key_cache.dtype},value_cache.dtype: {value_cache.dtype}"
             self.unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -482,11 +481,12 @@ class TritonAttentionImpl(AttentionImpl):
                 window_size=self.sliding_window,
                 block_table=block_table,
                 softcap=self.logits_soft_cap,
-                q_descale=None,  # Not supported
+                q_descale=layer._q_scale.expand(descale_shape),
                 k_descale=layer._k_scale.expand(descale_shape),
                 v_descale=layer._v_scale.expand(descale_shape),
+                p_descale=layer._prob_scale.expand(descale_shape),
                 sinks=self.sinks,
                 output_scale=output_scale,
             )
-
+            # assert False, f"q_descale: {layer._q_scale.expand(descale_shape)}, k_descale: {layer._k_scale.expand(descale_shape)}, v_descale: {layer._v_scale.expand(descale_shape)}, p_descale: {layer._prob_scale.expand(descale_shape)}"
         return output

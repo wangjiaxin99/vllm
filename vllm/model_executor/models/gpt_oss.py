@@ -26,6 +26,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import maybe_remap_kv_scale_name
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -109,6 +110,11 @@ class OAIAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = config.rope_theta
 
+        if quant_config is not None and quant_config.get_name() == "quark":
+            exclude_list = getattr(quant_config, "quant_config", {}).get("exclude", [])
+            if exclude_list:
+                quant_config.quant_config["exclude"] = self.map_prefixes(exclude_list)
+
         self.qkv = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_size=self.head_dim,
@@ -144,6 +150,14 @@ class OAIAttention(nn.Module):
             sinks=self.sinks,
             rotary_emb=self.rotary_emb if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None,
         )
+
+    def map_prefixes(self, exclude_list: list[str]) -> list[str]:
+        exclude_list_new = []
+        for text in exclude_list:
+            text = text.replace("self_attn", "attn")
+            text = text.replace("model.layers.", "model.block.")
+            exclude_list_new.append(text)
+        return exclude_list_new
 
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
@@ -238,7 +252,12 @@ class TransformerBlock(torch.nn.Module):
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
+        if quant_config is not None and quant_config.get_name() == "mxfp4":
+            attn_quant_config = None
+        else:
+            attn_quant_config = quant_config
         self.attn = OAIAttention(config,
+                                 quant_config=attn_quant_config,
                                  prefix=f"{prefix}.attn",
                                  cache_config=cache_config)
         self.mlp = MLPBlock(config,
@@ -619,6 +638,23 @@ class GptOssModel(nn.Module):
                           intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             if "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
@@ -630,7 +666,7 @@ class GptOssModel(nn.Module):
                 continue
 
             # mapping to convert individual experts input_scale into fused_moe.
-            elif "input_scale" in name:  # w2 w13 input_scale
+            elif "input_scale" in name and ".mlp.experts." in name:  # w2 w13 input_scale
                 parts = name.split(".")
                 expert_id = int(parts[-2])
                 name = ".".join(parts[:-2] + parts[-1:])
@@ -898,7 +934,7 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module):
-    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
