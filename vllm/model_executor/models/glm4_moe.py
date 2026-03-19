@@ -499,6 +499,11 @@ class Glm4MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        # Skip loading extra parameters for GPTQ/modelopt models.
+        ignore_suffixes = (
+            ".output_scale",
+        )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
@@ -519,10 +524,20 @@ class Glm4MoeModel(nn.Module):
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+
+                # Skip loading extra parameters for GPTQ/modelopt models.
+                if name.endswith(ignore_suffixes) and name not in params_dict:
                     continue
+
+                # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
+                    continue
+                if name.endswith("scale"):
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+                if name not in params_dict:
                     continue
 
                 param = params_dict[name]
@@ -546,6 +561,14 @@ class Glm4MoeModel(nn.Module):
 
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
+
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if (
+                        name_mapped.endswith(ignore_suffixes)
+                        and name_mapped not in params_dict
+                    ):
+                        continue
+
 
                     param = params_dict[name_mapped]
                     # We should ask the weight loader to return success or not
@@ -572,6 +595,9 @@ class Glm4MoeModel(nn.Module):
                         # So we simply skip it
                         continue
 
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if name.endswith(ignore_suffixes) and name not in params_dict:
+                        continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue

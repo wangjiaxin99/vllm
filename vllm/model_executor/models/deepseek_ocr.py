@@ -17,6 +17,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    SupportsQuant,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
@@ -345,7 +346,14 @@ class DeepseekOCRMultiModalProcessor(
     info=DeepseekOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
-class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,SupportsQuant):
+    packed_modules_mapping = {
+        "qkv_proj":[
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        ],
+     }
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone
@@ -367,6 +375,18 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        
+        # # DEBUG: 确认使用的是 deepseek_ocr.py
+        # import sys
+        # print(f"\n{'='*80}", file=sys.stderr)
+        # print(f"[DEBUG] 正在使用 deepseek_ocr.py 中的 DeepseekOCRForCausalLM", file=sys.stderr)
+        # print(f"[DEBUG] vllm_config.model_config.hf_config type: {type(vllm_config.model_config.hf_config).__name__}", file=sys.stderr)
+        # print(f"[DEBUG] vllm_config.quant_config: {vllm_config.quant_config}", file=sys.stderr)
+        # if hasattr(vllm_config.model_config.hf_config, 'model_type'):
+        #     print(f"[DEBUG] config.model_type: {vllm_config.model_config.hf_config.model_type}", file=sys.stderr)
+        # if vllm_config.quant_config:
+        #     print(f"[DEBUG] quant_config.packed_modules_mapping (DeepseekOCR): {vllm_config.quant_config.packed_modules_mapping}", file=sys.stderr)
+        # print(f"{'='*80}\n", file=sys.stderr)
 
         config: DeepseekVLV2Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config

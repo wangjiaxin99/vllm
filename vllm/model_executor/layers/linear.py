@@ -1084,6 +1084,16 @@ class QKVParallelLinear(ColumnParallelLinear):
                 weight_block_size, shard_size, shard_offset
             )
 
+        # # 添加调试信息：记录 loaded_weight 的原始形状
+        # import sys
+        # print(f"\n[DEBUG weight_loader_v2] About to call load_qkv_weight:", file=sys.stderr)
+        # print(f"  loaded_weight.shape: {loaded_weight.shape}", file=sys.stderr)
+        # print(f"  loaded_weight.dtype: {loaded_weight.dtype}", file=sys.stderr)
+        # print(f"  loaded_shard_id: {loaded_shard_id}", file=sys.stderr)
+        # print(f"  shard_offset: {shard_offset}", file=sys.stderr)
+        # print(f"  shard_size: {shard_size}", file=sys.stderr)
+        # print(f"  param type: {type(param).__name__}", file=sys.stderr)
+        
         param.load_qkv_weight(
             loaded_weight=loaded_weight,
             num_heads=self.num_kv_head_replicas,
@@ -1091,6 +1101,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_offset=shard_offset,
             shard_size=shard_size,
             tp_rank=self.tp_rank,
+            _orig_loaded_weight_shape=loaded_weight.shape,  # 传递原始形状用于调试
         )
 
     def weight_loader(

@@ -672,7 +672,33 @@ class DeepCLIPVisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # Skip if the parameter doesn't exist (e.g., position_ids buffer)
+            if name not in params_dict:
+                continue
             param = params_dict[name]
+            
+            # Special handling for PackedvLLMParameter in vision models
+            # These should not be quantized based on the exclude list, but the
+            # prefix wasn't set correctly during model initialization
+            from vllm.model_executor.parameter import PackedvLLMParameter
+            if isinstance(param, PackedvLLMParameter):
+                # Unpack by loading directly to the parameter data
+                # The packed_factor is typically 2 for MXFP4
+                if param.data.shape != loaded_weight.shape:
+                    import sys
+                    print(f"\n[WARNING] Unpacking PackedvLLMParameter for: {name}", file=sys.stderr)
+                    print(f"  param.shape (packed): {param.data.shape}", file=sys.stderr)
+                    print(f"  loaded_weight.shape: {loaded_weight.shape}", file=sys.stderr)
+                    # For vision models, we should not have packed parameters
+                    # This indicates the layer wasn't excluded from quantization properly
+                    # Load the full weight without packing
+                    assert loaded_weight.shape[1] == param.data.shape[1] * 2, \
+                        f"Expected unpacked dim to be 2x packed dim, got {loaded_weight.shape} vs {param.data.shape}"
+                    # Create a new unpacked parameter
+                    param.data = loaded_weight
+                    loaded_params.add(name)
+                    continue
+            
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)

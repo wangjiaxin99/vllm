@@ -85,7 +85,7 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -146,6 +146,7 @@ class DeepseekAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.o_proj = RowParallelLinear(
@@ -153,6 +154,7 @@ class DeepseekAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -1390,15 +1392,30 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle, SupportsQuant
 ):
     packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
     model_cls = DeepseekV2Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        
+        # DEBUG: 确认使用的是 deepseek_v2.py
+        # import sys
+        # print(f"\n{'='*80}", file=sys.stderr)
+        # print(f"[DEBUG] 正在使用 deepseek_v2.py 中的 DeepseekV2ForCausalLM", file=sys.stderr)
+        # print(f"[DEBUG] self.packed_modules_mapping: {self.packed_modules_mapping}", file=sys.stderr)
+        # if vllm_config.quant_config:
+        #     print(f"[DEBUG] quant_config.packed_modules_mapping: {vllm_config.quant_config.packed_modules_mapping}", file=sys.stderr)
+        # print(f"{'='*80}\n", file=sys.stderr)
+        
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -1590,6 +1607,15 @@ class DeepseekV2ForCausalLM(
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                
+                # # 添加调试信息
+                # import sys
+                # print(f"\n[DEBUG deepseek_v2 load_weights] Loading weight: {name}", file=sys.stderr)
+                # print(f"  loaded_weight.shape: {loaded_weight.shape}", file=sys.stderr)
+                # print(f"  loaded_weight.dtype: {loaded_weight.dtype}", file=sys.stderr)
+                # print(f"  shard_id: {shard_id}", file=sys.stderr)
+                # print(f"  param type: {type(param).__name__}", file=sys.stderr)
+                
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
