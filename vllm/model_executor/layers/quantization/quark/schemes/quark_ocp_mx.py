@@ -36,6 +36,16 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
+def _is_linear_backend_emulation() -> bool:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    return (
+        vllm_config is not None
+        and vllm_config.kernel_config.linear_backend == "emulation"
+    )
+
+
 class QuarkOCP_MX(QuarkScheme):
     def __init__(
         self,
@@ -90,10 +100,18 @@ class QuarkOCP_MX(QuarkScheme):
                 "implemented. Please open an issue."
             )
 
+        force_emulation = _is_linear_backend_emulation()
+
         # TODO: integrate (or test) mixed-precision kernel.
-        self.emulate = not current_platform.supports_mx() or (
+        self.emulate = force_emulation or not current_platform.supports_mx() or (
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
+
+        if force_emulation:
+            logger.info_once(
+                "Using emulation for Quark OCP MX linear layers because "
+                "--linear-backend=emulation is set."
+            )
 
         # TODO: Move emulation code path as a kernel, and always
         # use init_mxfp4_linear_kernel.
