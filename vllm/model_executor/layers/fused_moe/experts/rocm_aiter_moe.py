@@ -486,6 +486,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SITU,
         ]
 
     @staticmethod
